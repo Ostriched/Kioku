@@ -1,3 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script src="firebase-config.js"></script>
+<script>/* =========================================================
+   ACCOUNTS (website build only)
+   On claude.ai the page gets window.claude, whose "db" and "user" capabilities sync progress to the
+   viewer's account. On the website there is no such host, so this file provides the same two
+   capabilities backed by Firebase (sign-in + Firestore). The app's sync code is unchanged.
+   Each saved document is stored as one JSON string, so Firestore's rules on nested arrays and
+   undefined values never apply. Progress in this browser belongs to whoever last signed in here
+   (kioku.owner): signing out clears it, and a different account never sees the previous one's.
+   ========================================================= */
+(() => {
+  const CFG = window.KIOKU_FIREBASE;
+  if (window.claude || !CFG || !CFG.apiKey) return;
+  const SDK = "https://www.gstatic.com/firebasejs/10.12.2/firebase-";
+  const OWNER = "kioku.owner", PROGRESS = ["kioku.v1", "kioku.psych.v1", "kioku.sat.v1"], DOCS = ["progress", "psych", "psych_cards", "psych_frq", "psych_gen", "sat"];
+  const ls = { get: (k) => { try { return localStorage.getItem(k) } catch (e) { return null } }, set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v) } catch (e) {} } };
+  const clearProgress = () => PROGRESS.forEach((k) => ls.set(k, null));
+  const load = (n) => new Promise((ok, bad) => { const s = document.createElement("script"); s.src = SDK + n + "-compat.js"; s.onload = ok; s.onerror = () => bad(new Error("Could not load " + n)); document.head.appendChild(s) });
+
+  let auth = null, fs = null, current = null;
+  const ready = (async () => {
+    if (!window.firebase) { await load("app"); await Promise.all([load("auth"), load("firestore")]) }
+    firebase.initializeApp(CFG); auth = firebase.auth(); fs = firebase.firestore();
+    current = await new Promise((ok) => { const off = auth.onAuthStateChanged((u) => { off(); ok(u) }) });
+    // This browser's saved progress must belong to the signed-in account (or to a guest)
+    const owner = ls.get(OWNER);
+    if ((current && owner && owner !== current.uid) || (!current && owner)) { clearProgress(); ls.set(OWNER, current ? current.uid : null); location.reload(); return new Promise(() => {}) }
+    if (current && !owner) ls.set(OWNER, current.uid);
+    return current;
+  })().catch((e) => { console.warn("Accounts unavailable:", e); return null });
+
+  const path = (uid, name) => "data/users/" + uid + "/" + name;
+  const doc = (p) => ({
+    get: async () => { const s = await fs.doc(p).get(); const d = s.exists ? s.data() : null; return { exists: !!d, data: () => (d && d.json ? JSON.parse(d.json) : null) } },
+    set: async (v) => { const json = JSON.stringify(v); if (json.length > 900000) { const e = new Error("too big"); e.code = "invalid_argument"; throw e } await fs.doc(p).set({ json, at: Date.now() }) },
+  });
+  window.claude = {
+    use: async (name) => {
+      const u = await ready; if (!u) return null;
+      if (name === "db") return { doc: (p) => { if (!p.startsWith("data/users/" + u.uid + "/")) throw new Error("not your data"); return doc(p) } };
+      if (name === "user") return { id: async () => u.uid, name: async () => u.displayName || u.email };
+      return null;
+    },
+  };
+
+  // After signing in: an account that already has saved progress wins over what a guest did here;
+  // an empty account adopts this browser's progress.
+  async function afterSignIn(u) {
+    const has = (await Promise.all(DOCS.map((n) => fs.doc(path(u.uid, n)).get()))).some((s) => s.exists);
+    if (has) clearProgress();
+    ls.set(OWNER, u.uid); location.reload();
+  }
+  async function signOut() { clearProgress(); ls.set(OWNER, null); try { await auth.signOut() } catch (e) {} location.reload() }
+
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const ERR = { "auth/invalid-credential": "That email and password don't match an account.", "auth/wrong-password": "That password isn't right.", "auth/user-not-found": "No account uses that email yet. Choose Create account.", "auth/email-already-in-use": "An account already uses that email. Choose Sign in.", "auth/weak-password": "Use at least 6 characters for the password.", "auth/invalid-email": "That email address doesn't look right.", "auth/popup-closed-by-user": "The Google window was closed before signing in.", "auth/network-request-failed": "Couldn't reach the sign-in service. Check your connection." };
+
+  function dialog() {
+    let dl = document.getElementById("acctDlg");
+    if (dl) return dl;
+    dl = document.createElement("dialog"); dl.id = "acctDlg"; dl.className = "acct-dlg"; dl.setAttribute("aria-labelledby", "acctTitle");
+    document.body.appendChild(dl);
+    dl.addEventListener("click", (e) => { if (e.target === dl) dl.close() });
+    return dl;
+  }
+  function openDialog(mode = "in", msg = "") {
+    const dl = dialog(), u = current;
+    dl.innerHTML = u ? `<h2 id="acctTitle">Your account</h2>
+      <p class="acct-who">Signed in as <b>${esc(u.email || u.displayName || "your account")}</b>. Your progress saves to this account on every device.</p>
+      <div class="acct-row"><button type="button" class="btn primary" data-a="close">Done</button><button type="button" class="btn ghost" data-a="out">Sign out</button></div>
+      <p class="acct-note">Signing out removes your progress from this browser. It stays saved in your account.</p>`
+      : `<h2 id="acctTitle">${mode === "up" ? "Create an account" : "Sign in"}</h2>
+      <p class="acct-who">Save your progress to an account so it follows you to any device.</p>
+      <button type="button" class="btn acct-google" data-a="google">Continue with Google</button>
+      <p class="acct-or"><span>or use email</span></p>
+      <form class="acct-form" novalidate>
+        <label>Email<input type="email" name="email" autocomplete="email" required></label>
+        <label>Password<input type="password" name="pw" autocomplete="${mode === "up" ? "new-password" : "current-password"}" minlength="6" required></label>
+        <p class="acct-err" role="alert">${esc(msg)}</p>
+        <button type="submit" class="btn primary">${mode === "up" ? "Create account" : "Sign in"}</button>
+      </form>
+      <p class="acct-switch">${mode === "up" ? `Already have an account? <button type="button" class="linkbtn" data-a="in">Sign in</button>` : `New here? <button type="button" class="linkbtn" data-a="up">Create an account</button>`}</p>
+      ${ls.get(PROGRESS[0]) || ls.get(PROGRESS[1]) || ls.get(PROGRESS[2]) ? `<p class="acct-note">If the account is new, what you've done here moves into it. If it already has progress, that progress loads instead.</p>` : ""}
+      <button type="button" class="acct-x iconbtn" data-a="close" aria-label="Close">×</button>`;
+    const busy = (on) => dl.querySelectorAll("button,input").forEach((b) => b.disabled = on);
+    const fail = (e) => { busy(false); const p = dl.querySelector(".acct-err"); if (p) p.textContent = ERR[e && e.code] || "Something went wrong. Please try again." };
+    dl.onclick = async (e) => {
+      const a = e.target.closest("[data-a]"); if (!a) { if (e.target === dl) dl.close(); return }
+      const act = a.dataset.a;
+      if (act === "close") dl.close();
+      else if (act === "out") signOut();
+      else if (act === "in" || act === "up") openDialog(act);
+      else if (act === "google") { busy(true); try { const r = await auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); await afterSignIn(r.user) } catch (err) { fail(err) } }
+    };
+    const f = dl.querySelector("form");
+    if (f) f.onsubmit = async (e) => {
+      e.preventDefault(); const em = f.email.value.trim(), pw = f.pw.value;
+      if (!em || pw.length < 6) return fail({ code: !em ? "auth/invalid-email" : "auth/weak-password" });
+      busy(true);
+      try { const r = mode === "up" ? await auth.createUserWithEmailAndPassword(em, pw) : await auth.signInWithEmailAndPassword(em, pw); await afterSignIn(r.user) } catch (err) { fail(err) }
+    };
+    if (!dl.open) dl.showModal();
+    const first = dl.querySelector("input,button"); if (first) first.focus();
+  }
+
+  function mountButton() {
+    const right = document.querySelector(".tb-right"); if (!right || document.getElementById("acctBtn")) return;
+    const b = document.createElement("button"); b.id = "acctBtn"; b.type = "button"; b.className = "acct-btn"; b.textContent = "Sign in";
+    b.addEventListener("click", () => openDialog("in"));
+    right.insertBefore(b, right.firstChild);
+    ready.then((u) => {
+      if (!u) return;
+      const nm = u.displayName || u.email || "Account";
+      b.textContent = nm.slice(0, 1).toUpperCase(); b.classList.add("is-in");
+      b.setAttribute("aria-label", "Account: " + nm); b.title = nm;
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mountButton); else mountButton();
+  window.kiokuAccount = { open: openDialog, ready };
+})();
+</script>
 <title>Kioku Study</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1817,6 +1943,29 @@ button,a,summary,label,select,input,[role="button"],.opts button,.fc-card{touch-
 
 /* form controls use the app font, not the browser default */
 input,select,textarea,button{font-family:inherit}
+
+/* Accounts (website build): sign-in button in the top bar and the sign-in dialog */
+.acct-btn{height:32px;min-width:32px;padding:0 12px;border:1px solid var(--line-strong);border-radius:999px;background:var(--surface);color:var(--ink);font:500 .8125rem var(--f-body);cursor:pointer}
+.acct-btn:hover{border-color:var(--ai)}
+.acct-btn.is-in{padding:0;width:32px;background:var(--ai);border-color:var(--ai);color:var(--on-ai);font-weight:600}
+.acct-dlg{position:fixed;inset:0;margin:auto;width:min(400px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);color:var(--ink);padding:24px;box-shadow:0 20px 50px rgba(0,0,0,.25)}
+.acct-dlg::backdrop{background:rgba(0,0,0,.45)}
+.acct-dlg h2{margin:0 0 8px;font:600 1.25rem var(--f-body)}
+.acct-who{margin:0 0 16px;color:var(--muted);font-size:.9375rem;line-height:1.5}
+.acct-who b{color:var(--ink);font-weight:600;word-break:break-all}
+.acct-google{width:100%;justify-content:center}
+.acct-or{display:flex;align-items:center;gap:12px;margin:16px 0;color:var(--muted);font-size:.8125rem}
+.acct-or::before,.acct-or::after{content:"";flex:1;border-top:1px solid var(--line)}
+.acct-form{display:grid;gap:12px}
+.acct-form label{display:grid;gap:4px;font-size:.875rem;font-weight:500}
+.acct-form input{height:40px;padding:0 12px;border:1px solid var(--line-strong);border-radius:var(--radius-md);background:var(--surface);color:var(--ink);font:400 1rem var(--f-body)}
+.acct-form input:focus-visible{outline:2px solid var(--ai);outline-offset:1px}
+.acct-form .btn{width:100%;justify-content:center}
+.acct-err{margin:0;min-height:1.25em;color:var(--bad);font-size:.875rem}
+.acct-err:empty{min-height:0}
+.acct-switch,.acct-note{margin:16px 0 0;font-size:.875rem;color:var(--muted);line-height:1.5}
+.acct-row{display:flex;gap:8px;flex-wrap:wrap}
+.acct-x{position:absolute;top:8px;right:8px;font-size:1.5rem}
 
 </style>
 
@@ -7782,3 +7931,5 @@ paletteItems = function () {
 
 render();
 </script>
+
+</html>

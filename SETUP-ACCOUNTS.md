@@ -8,7 +8,7 @@ They use Firebase, which is free at this scale. One-time setup, about ten minute
 2. **Build → Authentication → Get started.** Under *Sign-in method*, enable **Email/Password**
    and **Google**.
 3. Still in Authentication, open **Settings → Authorized domains** and add your Pages domain,
-   `kiokustudy.org` (and `ostriched.github.io` if you also use that address).
+   `ostriched.github.io` (and your custom domain too, if you add one later).
 4. **Build → Firestore Database → Create database** (production mode, any location).
    Open the **Rules** tab, replace the contents with the contents of `firestore.rules`
    from this repository, and click **Publish**.

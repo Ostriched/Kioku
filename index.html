@@ -53,9 +53,28 @@
   async function afterSignIn(u) {
     const has = (await Promise.all(DOCS.map((n) => fs.doc(path(u.uid, n)).get()))).some((s) => s.exists);
     if (has) clearProgress();
-    ls.set(OWNER, u.uid); location.reload();
+    ls.set(OWNER, u.uid); finish("Signed in", has ? "Loading your saved progress…" : "Saving your progress to this account…");
   }
-  async function signOut() { clearProgress(); ls.set(OWNER, null); try { await auth.signOut() } catch (e) {} location.reload() }
+  async function signOut() { clearProgress(); ls.set(OWNER, null); try { await auth.signOut() } catch (e) {} finish("Signed out", "Your progress stays saved in your account.") }
+
+  // Motion follows the app's: short fades and small settles, a drawn check for success,
+  // and nothing at all under reduced motion.
+  const still = () => { try { return matchMedia("(prefers-reduced-motion: reduce)").matches } catch (e) { return false } };
+  function closeDlg(dl) {
+    if (!dl.open || dl.classList.contains("closing")) return;
+    if (still()) return dl.close();
+    dl.classList.add("closing");
+    let gone = false; const done = () => { if (gone) return; gone = true; if (dl.classList.contains("closing")) { dl.classList.remove("closing"); dl.close() } };
+    dl.addEventListener("animationend", (e) => { if (e.target === dl) done() }); setTimeout(done, 260);
+  }
+  // A brief confirmation with a check drawn in ink, then the page reloads into the account
+  function finish(title, line) {
+    const dl = dialog();
+    dl.innerHTML = `<div class="acct-done" role="status"><svg class="acct-check" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="23"/><path d="M15.5 27.5l7 7 14-15"/></svg><h2 id="acctTitle">${title}</h2><p>${line}</p></div>`;
+    if (!dl.open) dl.showModal();
+    try { sessionStorage.setItem("kioku.stamp", "1") } catch (e) {}
+    setTimeout(() => location.reload(), still() ? 150 : 900);
+  }
 
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const ERR = { "auth/invalid-credential": "That email and password don't match an account.", "auth/wrong-password": "That password isn't right.", "auth/user-not-found": "No account uses that email yet. Choose Create account.", "auth/email-already-in-use": "An account already uses that email. Choose Sign in.", "auth/weak-password": "Use at least 6 characters for the password.", "auth/invalid-email": "That email address doesn't look right.", "auth/popup-closed-by-user": "The Google window was closed before signing in.", "auth/network-request-failed": "Couldn't reach the sign-in service. Check your connection." };
@@ -65,7 +84,7 @@
     if (dl) return dl;
     dl = document.createElement("dialog"); dl.id = "acctDlg"; dl.className = "acct-dlg"; dl.setAttribute("aria-labelledby", "acctTitle");
     document.body.appendChild(dl);
-    dl.addEventListener("click", (e) => { if (e.target === dl) dl.close() });
+    dl.addEventListener("cancel", (e) => { e.preventDefault(); closeDlg(dl) });
     return dl;
   }
   function openDialog(mode = "in", msg = "") {
@@ -87,23 +106,28 @@
       <p class="acct-switch">${mode === "up" ? `Already have an account? <button type="button" class="linkbtn" data-a="in">Sign in</button>` : `New here? <button type="button" class="linkbtn" data-a="up">Create an account</button>`}</p>
       ${ls.get(PROGRESS[0]) || ls.get(PROGRESS[1]) || ls.get(PROGRESS[2]) ? `<p class="acct-note">If the account is new, what you've done here moves into it. If it already has progress, that progress loads instead.</p>` : ""}
       <button type="button" class="acct-x iconbtn" data-a="close" aria-label="Close">×</button>`;
-    const busy = (on) => dl.querySelectorAll("button,input").forEach((b) => b.disabled = on);
-    const fail = (e) => { busy(false); const p = dl.querySelector(".acct-err"); if (p) p.textContent = ERR[e && e.code] || "Something went wrong. Please try again." };
+    const busy = (on, btn) => { dl.querySelectorAll("button,input").forEach((b) => b.disabled = on); dl.querySelectorAll(".is-busy").forEach((b) => b.classList.remove("is-busy")); if (on && btn) btn.classList.add("is-busy") };
+    const fail = (e) => {
+      busy(false); const p = dl.querySelector(".acct-err"); if (!p) return;
+      p.textContent = ERR[e && e.code] || "Something went wrong. Please try again.";
+      const form = dl.querySelector(".acct-form"); form.classList.remove("shake"); void form.offsetWidth; form.classList.add("shake");
+    };
     dl.onclick = async (e) => {
-      const a = e.target.closest("[data-a]"); if (!a) { if (e.target === dl) dl.close(); return }
+      const a = e.target.closest("[data-a]"); if (!a) { if (e.target === dl) closeDlg(dl); return }
       const act = a.dataset.a;
-      if (act === "close") dl.close();
+      if (act === "close") closeDlg(dl);
       else if (act === "out") signOut();
       else if (act === "in" || act === "up") openDialog(act);
-      else if (act === "google") { busy(true); try { const r = await auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); await afterSignIn(r.user) } catch (err) { fail(err) } }
+      else if (act === "google") { busy(true, a); try { const r = await auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); await afterSignIn(r.user) } catch (err) { fail(err) } }
     };
     const f = dl.querySelector("form");
     if (f) f.onsubmit = async (e) => {
       e.preventDefault(); const em = f.email.value.trim(), pw = f.pw.value;
       if (!em || pw.length < 6) return fail({ code: !em ? "auth/invalid-email" : "auth/weak-password" });
-      busy(true);
+      busy(true, f.querySelector("[type=submit]"));
       try { const r = mode === "up" ? await auth.createUserWithEmailAndPassword(em, pw) : await auth.signInWithEmailAndPassword(em, pw); await afterSignIn(r.user) } catch (err) { fail(err) }
     };
+    dl.classList.remove("closing");
     if (!dl.open) dl.showModal();
     const first = dl.querySelector("input,button"); if (first) first.focus();
   }
@@ -117,6 +141,8 @@
       if (!u) return;
       const nm = u.displayName || u.email || "Account";
       b.textContent = nm.slice(0, 1).toUpperCase(); b.classList.add("is-in");
+      // the initial is stamped on only once, right after signing in
+      try { if (sessionStorage.getItem("kioku.stamp")) { sessionStorage.removeItem("kioku.stamp"); b.classList.add("stamp") } } catch (e) {}
       b.setAttribute("aria-label", "Account: " + nm); b.title = nm;
     });
   }
@@ -1966,6 +1992,50 @@ input,select,textarea,button{font-family:inherit}
 .acct-switch,.acct-note{margin:16px 0 0;font-size:.875rem;color:var(--muted);line-height:1.5}
 .acct-row{display:flex;gap:8px;flex-wrap:wrap}
 .acct-x{position:absolute;top:8px;right:8px;font-size:1.5rem}
+
+/* ---- motion: matches MOTION v3 (fades and small settles; a stamp and an ink check for success) ---- */
+.acct-btn{transition:border-color var(--m-fast),background-color var(--m-fast),color var(--m-fast),transform var(--m-fast) var(--m-out),box-shadow var(--m-fast)}
+.acct-btn:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.acct-btn:active{transform:scale(.95);box-shadow:none}
+.acct-btn.stamp{animation:acctStamp .5s var(--m-spring) both}
+@keyframes acctStamp{0%{opacity:0;transform:scale(1.6) rotate(-8deg)}60%{opacity:1}100%{transform:none}}
+.acct-dlg[open]{animation:acctIn var(--m-med) var(--m-out) both}
+.acct-dlg[open]::backdrop{animation:acctFade var(--m-med) ease both}
+.acct-dlg.closing{animation:acctOut .18s ease-in both}
+.acct-dlg.closing::backdrop{animation:acctFade .18s ease-in reverse both}
+@keyframes acctIn{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
+@keyframes acctOut{to{opacity:0;transform:translateY(6px) scale(.98)}}
+@keyframes acctFade{from{opacity:0}to{opacity:1}}
+.acct-dlg>*{animation:acctRise .32s var(--m-out) both}
+.acct-dlg>:nth-child(2){animation-delay:.03s}.acct-dlg>:nth-child(3){animation-delay:.06s}.acct-dlg>:nth-child(4){animation-delay:.09s}
+.acct-dlg>:nth-child(5){animation-delay:.12s}.acct-dlg>:nth-child(6){animation-delay:.15s}.acct-dlg>:nth-child(n+7){animation-delay:.18s}
+.acct-dlg>.acct-x{animation:acctFade var(--m-med) both}
+@keyframes acctRise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.acct-form input{transition:border-color var(--m-fast),box-shadow var(--m-fast)}
+.acct-form input:focus{border-color:var(--ai);box-shadow:0 0 0 3px var(--ai-soft)}
+.acct-dlg .btn{transition:transform var(--m-fast) var(--m-out),background-color var(--m-fast),border-color var(--m-fast)}
+.acct-dlg .btn:active:not(:disabled){transform:scale(.98)}
+.acct-err:not(:empty){animation:acctRise .2s var(--m-out) both}
+.acct-form.shake{animation:acctShake .36s var(--m-pen)}
+@keyframes acctShake{20%{transform:translateX(-5px)}40%{transform:translateX(4px)}60%{transform:translateX(-3px)}80%{transform:translateX(2px)}}
+.acct-form:has(.acct-err:not(:empty)) input{border-color:var(--bad)}
+.btn.is-busy{position:relative;color:transparent!important}
+.btn.is-busy::after{content:"";position:absolute;inset:0;margin:auto;width:16px;height:16px;border-radius:50%;border:2px solid currentColor;border-color:var(--on-ai) var(--on-ai) transparent transparent;animation:acctSpin .7s linear infinite}
+.btn.acct-google.is-busy::after{border-color:var(--ink) var(--ink) transparent transparent}
+@keyframes acctSpin{to{transform:rotate(360deg)}}
+.acct-done{text-align:center;padding:8px 0}
+.acct-done h2{margin:12px 0 4px}
+.acct-done p{margin:0;color:var(--muted)}
+.acct-check{width:56px;height:56px;fill:none;stroke:var(--good);stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.acct-check circle{stroke-dasharray:145;stroke-dashoffset:145;animation:acctDraw .45s var(--m-pen) forwards}
+.acct-check path{stroke-dasharray:36;stroke-dashoffset:36;animation:acctDraw .3s var(--m-pen) .35s forwards}
+@keyframes acctDraw{to{stroke-dashoffset:0}}
+@media (prefers-reduced-motion:reduce){
+  .acct-btn,.acct-btn.stamp,.acct-dlg[open],.acct-dlg[open]::backdrop,.acct-dlg.closing,.acct-dlg>*,.acct-form.shake,.acct-err:not(:empty){animation:none!important;transition:none!important}
+  .acct-btn:hover,.acct-btn:active{transform:none}
+  .acct-check circle,.acct-check path{animation:none;stroke-dashoffset:0}
+  .btn.is-busy::after{animation-duration:1.6s}
+}
 
 </style>
 

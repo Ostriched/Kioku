@@ -76,6 +76,8 @@
     setTimeout(() => location.reload(), still() ? 150 : 900);
   }
 
+  // Sign-in waits for Firebase to finish loading; if it never loaded (offline, blocked), say so instead of failing silently
+  const live = async () => { await ready; return !!auth };
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const ERR = { "auth/invalid-credential": "That email and password don't match an account.", "auth/wrong-password": "That password isn't right.", "auth/user-not-found": "No account uses that email yet. Choose Create account.", "auth/email-already-in-use": "An account already uses that email. Choose Sign in.", "auth/weak-password": "Use at least 6 characters for the password.", "auth/invalid-email": "That email address doesn't look right.", "auth/popup-closed-by-user": "The Google window was closed before signing in.", "auth/network-request-failed": "Couldn't reach the sign-in service. Check your connection." };
 
@@ -118,14 +120,14 @@
       if (act === "close") closeDlg(dl);
       else if (act === "out") signOut();
       else if (act === "in" || act === "up") openDialog(act);
-      else if (act === "google") { busy(true, a); try { const r = await auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); await afterSignIn(r.user) } catch (err) { fail(err) } }
+      else if (act === "google") { busy(true, a); try { if (!(await live())) throw { code: "auth/network-request-failed" }; const r = await auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); await afterSignIn(r.user) } catch (err) { fail(err) } }
     };
     const f = dl.querySelector("form");
     if (f) f.onsubmit = async (e) => {
       e.preventDefault(); const em = f.email.value.trim(), pw = f.pw.value;
       if (!em || pw.length < 6) return fail({ code: !em ? "auth/invalid-email" : "auth/weak-password" });
       busy(true, f.querySelector("[type=submit]"));
-      try { const r = mode === "up" ? await auth.createUserWithEmailAndPassword(em, pw) : await auth.signInWithEmailAndPassword(em, pw); await afterSignIn(r.user) } catch (err) { fail(err) }
+      try { if (!(await live())) throw { code: "auth/network-request-failed" }; const r = mode === "up" ? await auth.createUserWithEmailAndPassword(em, pw) : await auth.signInWithEmailAndPassword(em, pw); await afterSignIn(r.user) } catch (err) { fail(err) }
     };
     dl.classList.remove("closing");
     if (!dl.open) dl.showModal();
@@ -1946,6 +1948,10 @@ button,a,summary,label,select,input,[role="button"],.opts button,.fc-card{touch-
   html.zoomed body.insession .sat-askcol{gap:12px}
   html.zoomed body.insession .rw-fig{margin-top:10px}
   html.zoomed body.insession .pchart svg{max-height:30vh;width:auto;max-width:100%}
+  /* zoomed out, a 900–1100px screen has room for the passage and the question side by side */
+  html.zoomed body.insession .sat-split{grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:0}
+  html.zoomed body.insession .sat-pass{padding:4px 36px 4px 0}
+  html.zoomed body.insession .sat-askcol{padding-left:36px;border-left:1px solid var(--line)}
   html.zoomed body.insession .pchart{margin-bottom:8px;gap:6px}
   html.zoomed body.insession .sat-fb .gr-why{gap:6px}
 }
@@ -2457,10 +2463,12 @@ const DAY=864e5, LKEY="kioku.v1";
 // Saved data without this mark predates the reset. Fresh state carries the mark, so the in-app erase never triggers it again.
 const WIPE="2026-10-29";
 const fresh = () => ({v:1,wipe:WIPE,cards:{},learned:{},log:{},settings:{newPerDay:20,batch:8,furi:true,autoplay:false,testDay:0,path:"freq",retention:0.9},best:{sprint:0},tests:[],savedAt:0});
+// A saved field of the wrong type (a damaged save or a partial cloud copy) falls back to its empty value
+const jaFix = (o) => { const f = fresh(); for (const k in f) if (o[k] === null || typeof o[k] !== typeof f[k] || Array.isArray(o[k]) !== Array.isArray(f[k])) o[k] = f[k]; return o };
 let S = fresh();
 const wipeJa=(d,t)=>{const n=fresh(); n.settings=Object.assign(n.settings,d.settings); n.savedAt=t; return n};
 // A copy wiped on load gets savedAt 0 so an account copy that was already wiped wins; an unwiped account copy is wiped when it loads.
-try{const raw=localStorage.getItem(LKEY); if(raw){const d=JSON.parse(raw); S=Object.assign(fresh(),d); S.settings=Object.assign(fresh().settings,S.settings); if(d.wipe!==WIPE){S=wipeJa(S,0); localStorage.setItem(LKEY,JSON.stringify(S))}}}catch(e){}
+try{const raw=localStorage.getItem(LKEY); if(raw){const d=JSON.parse(raw); S=jaFix(Object.assign(fresh(),d && typeof d==="object"?d:{})); S.settings=Object.assign(fresh().settings,S.settings); if(d.wipe!==WIPE){S=wipeJa(S,0); localStorage.setItem(LKEY,JSON.stringify(S))}}}catch(e){}
 let dbRef=null, saveTimer=null, saving=false, pendingSave=false;
 const syncEl=document.getElementById("sync");
 function save(){
@@ -2483,7 +2491,7 @@ async function pushDb(){
     const uid=await user.id(); if(!uid) return;
     const ref=db.doc("data/users/"+uid+"/progress");
     const snap=await ref.get();
-    if(snap.exists){const d=snap.data(); if(d&&(d.savedAt||0)>(S.savedAt||0)){S=Object.assign(fresh(),d);S.settings=Object.assign(fresh().settings,S.settings);if(d.wipe!==WIPE)S=wipeJa(S,Date.now());try{localStorage.setItem(LKEY,JSON.stringify(S))}catch(e){} if(!session) render()}}
+    if(snap.exists){const d=snap.data(); if(d&&(d.savedAt||0)>(S.savedAt||0)){S=jaFix(Object.assign(fresh(),d && typeof d==="object"?d:{}));S.settings=Object.assign(fresh().settings,S.settings);if(d.wipe!==WIPE)S=wipeJa(S,Date.now());try{localStorage.setItem(LKEY,JSON.stringify(S))}catch(e){} if(!session) render()}}
     dbRef=ref; syncEl.textContent="Synced to your account";
     if(!snap.exists||(snap.data().savedAt||0)<(S.savedAt||0)) if(S.savedAt) pushDb();
   }catch(e){}
@@ -4111,7 +4119,9 @@ PCON_LIST.forEach((c) => (c.vsG || []).forEach((g) => { const o = PCON[g]; if (o
 const PKEY = "kioku.psych.v1";
 function psyFresh() { return { v: 1, cards: {}, learned: {}, log: {}, q: {}, conf: {}, hist: {}, rating: {}, tests: [], flag: {}, frq: [], drafts: {}, genq: [], genfrq: [], settings: { newPerDay: 12, batch: 6, retention: 0.9, examDate: "", unit: 1 }, savedAt: { core: 0, cards: 0, frq: 0, gen: 0 } } }
 function psyNorm(o) {
-  const p = Object.assign(psyFresh(), o || {});
+  const f = psyFresh(), p = Object.assign(psyFresh(), o && typeof o === "object" ? o : {});
+  // A field of the wrong type (a damaged save or a partial cloud copy) falls back to empty instead of breaking every screen
+  for (const k in f) if (p[k] === null || typeof p[k] !== typeof f[k] || Array.isArray(p[k]) !== Array.isArray(f[k])) p[k] = f[k];
   p.settings = Object.assign(psyFresh().settings, p.settings || {});
   p.savedAt = Object.assign({ core: 0, cards: 0, frq: 0, gen: 0 }, p.savedAt && typeof p.savedAt === "object" ? p.savedAt : {});
   return p;
@@ -4166,7 +4176,7 @@ async function psyPush() {
       const d = snap.exists ? snap.data() || {} : null;
       if (d && (d.savedAt || 0) > (PSY.savedAt[k] || 0)) {
         const { savedAt, ...rest } = d;
-        if (k === "cards") PSY.cards = Object.fromEntries(Object.entries(rest.c || {}).map(([id, a]) => [id, { id, due: a[0] * 1000, ivl: a[1], ease: a[2] / 100, step: a[3], reps: a[4], lapses: a[5], last: a[6] * 1000, w: a[7] || 0, miss: a[8] || 0 }]));
+        if (k === "cards") PSY.cards = Object.fromEntries(Object.entries(rest.c && typeof rest.c === "object" ? rest.c : {}).filter(([, a]) => Array.isArray(a)).map(([id, a]) => [id, { id, due: a[0] * 1000, ivl: a[1], ease: a[2] / 100, step: a[3], reps: a[4], lapses: a[5], last: a[6] * 1000, w: a[7] || 0, miss: a[8] || 0 }]));
         else Object.assign(PSY, rest);
         PSY.savedAt[k] = savedAt; changed = true;
       }
@@ -5891,8 +5901,10 @@ const SAT_KEY = "kioku.sat.v1";
 // One-time progress reset (2026-10-29), same rule as Japanese: practice settings survive, everything else starts over.
 const SAT_WIPE = "2026-10-29";
 const satFresh = () => ({ v: 1, wipe: SAT_WIPE, w: {}, log: {}, set: { newPerDay: 15, lv: 0 }, savedAt: 0 });
+// A saved field of the wrong type (a damaged save or a partial cloud copy) falls back to its empty value
+const satFix = (o) => { const f = satFresh(); for (const k in f) if (o[k] === null || typeof o[k] !== typeof f[k] || Array.isArray(o[k]) !== Array.isArray(f[k])) o[k] = f[k]; o.set = Object.assign(f.set, o.set); return o };
 const satWipe = (d, t) => Object.assign(satFresh(), { set: Object.assign(satFresh().set, d.set), savedAt: t });
-var SAT = (() => { try { const d = JSON.parse(localStorage.getItem(SAT_KEY) || "null"); if (!d || !d.v) return satFresh(); if (d.wipe === SAT_WIPE) return Object.assign(satFresh(), d); const w = satWipe(d, 0); localStorage.setItem(SAT_KEY, JSON.stringify(w)); return w } catch (e) { return satFresh() } })();
+var SAT = (() => { try { const d = JSON.parse(localStorage.getItem(SAT_KEY) || "null"); if (!d || !d.v) return satFresh(); if (d.wipe === SAT_WIPE) return satFix(Object.assign(satFresh(), d)); const w = satFix(satWipe(d, 0)); localStorage.setItem(SAT_KEY, JSON.stringify(w)); return w } catch (e) { return satFresh() } })();
 var SS = null, satKey = 0, sdb = null, sTimer = null;
 const SAT_SECTIONS = [{ id: "today", label: "Today", views: ["s-today"] }, { id: "practice", label: "Practice", views: ["s-practice"] }, { id: "progress", label: "Progress", views: ["s-progress"] }];
 var SAT_LAST = {}, satView = "s-today";
@@ -5906,7 +5918,7 @@ async function satPush() { try { await sdb.set(SAT); if (SUBJ === "sat") syncEl.
   const uid = await user.id(); if (!uid) return;
   const ref = db.doc("data/users/" + uid + "/sat"), snap = await ref.get(), d = snap.exists ? snap.data() : null;
   sdb = ref;
-  if (d && (d.savedAt || 0) > (SAT.savedAt || 0)) { SAT = d.wipe === SAT_WIPE ? Object.assign(satFresh(), d) : satWipe(d, Date.now()); try { localStorage.setItem(SAT_KEY, JSON.stringify(SAT)) } catch (e) {} if (d.wipe !== SAT_WIPE) satPush(); if (SUBJ === "sat" && !SS) render() }
+  if (d && (d.savedAt || 0) > (SAT.savedAt || 0)) { SAT = satFix(d.wipe === SAT_WIPE ? Object.assign(satFresh(), d) : satWipe(d, Date.now())); try { localStorage.setItem(SAT_KEY, JSON.stringify(SAT)) } catch (e) {} if (d.wipe !== SAT_WIPE) satPush(); if (SUBJ === "sat" && !SS) render() }
   else if ((SAT.savedAt || 0) > ((d && d.savedAt) || 0)) satPush();
   if (SUBJ === "sat") syncEl.textContent = "Synced to your account";
 } catch (e) {} })();
@@ -7698,15 +7710,16 @@ window.addEventListener("keydown", (e) => {
 // Fit the question on one screen: during a question set on a laptop or larger screen the page scales
 // down from 90% just enough for everything to fit without scrolling, never below 75% so text stays
 // readable. Re-fits when the window changes size or a toggle (like "Why the other choices are wrong") opens.
-var FIT_MAX = 0.9, FIT_MIN = 0.75;
+// short laptop screens (under 700px tall) may shrink a little further so the controls stay in view
+var FIT_MAX = 0.9, fitMin = () => innerHeight < 700 ? 0.7 : 0.75;
 function fitScreen() {
   const html = document.documentElement;
   if (!html.classList.contains("zoomed") || innerWidth < 900) { html.style.removeProperty("--fitz"); return }
-  let z = FIT_MAX; html.style.setProperty("--fitz", z);
+  const lo = fitMin(); let z = FIT_MAX; html.style.setProperty("--fitz", z);
   for (let k = 0; k < 6; k++) {
     const st = document.querySelector("#app .study"), need = st ? st.getBoundingClientRect().bottom + scrollY : document.scrollingElement.scrollHeight, have = innerHeight - 8;
-    if (need <= have + 1 || z <= FIT_MIN) break;
-    z = Math.max(FIT_MIN, Math.floor(z * have / need * 100) / 100); html.style.setProperty("--fitz", z);
+    if (need <= have + 1 || z <= lo) break;
+    z = Math.max(lo, Math.floor(z * have / need * 100) / 100); html.style.setProperty("--fitz", z);
   }
 }
 addEventListener("resize", () => { clearTimeout(fitScreen.t); fitScreen.t = setTimeout(fitScreen, 120) });
